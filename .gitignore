@@ -48,3 +48,5 @@ booklore-api/src/main/resources/application-local.yaml
 /shared/
 
 /scratch
+
+.env*
