@@ -13,9 +13,9 @@ services:
     ports:
       - "6060:6060"
     volumes:
-      - ./data:/app/data
-      - ./books:/books
-      - ./bookdrop:/bookdrop
+      - /home/booklore/appdata:/app/data
+      - /home/booklore/books:/books
+      - /home/booklore/bookdrop:/bookdrop
     healthcheck:
       test: wget -q -O - http://localhost:6060/api/v1/healthcheck
       interval: 60s
@@ -30,7 +30,7 @@ services:
     env_file:
       - ../../.env.mariadb
     volumes:
-      - ./config:/config
+      - /home/booklore/dbconfig:/config
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "mariadb-admin", "ping", "-h", "localhost" ]
