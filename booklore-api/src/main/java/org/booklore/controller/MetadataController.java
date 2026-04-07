@@ -63,7 +63,7 @@ public class MetadataController {
     @PreAuthorize("@securityUtil.canEditMetadata() or @securityUtil.isAdmin()")
     @CheckBookAccess(bookIdParam = "bookId")
     public ResponseEntity<BookMetadata> updateMetadata(
-            @Parameter(description = "Metadata update wrapper") @RequestBody MetadataUpdateWrapper metadataUpdateWrapper,
+            @Parameter(description = "Metadata update wrapper") @Validated @RequestBody MetadataUpdateWrapper metadataUpdateWrapper,
             @Parameter(description = "ID of the book") @PathVariable long bookId,
             @Parameter(description = "Merge categories") @RequestParam(defaultValue = "false") boolean mergeCategories,
             @Parameter(description = "Replace mode") @RequestParam(defaultValue = "REPLACE_ALL") MetadataReplaceMode replaceMode) {
@@ -82,7 +82,6 @@ public class MetadataController {
                 .build();
 
         bookMetadataUpdater.setBookMetadata(context);
-        bookRepository.save(bookEntity);
         auditService.log(AuditAction.METADATA_UPDATED, "Book", bookId, "Updated metadata for book: " + bookEntity.getMetadata().getTitle());
         BookMetadata bookMetadata = bookMetadataMapper.toBookMetadata(bookEntity.getMetadata(), true);
         return ResponseEntity.ok(bookMetadata);
@@ -92,7 +91,7 @@ public class MetadataController {
     @ApiResponse(responseCode = "204", description = "Bulk metadata updated successfully")
     @PutMapping("/bulk-edit-metadata")
     @PreAuthorize("@securityUtil.canBulkEditMetadata() or @securityUtil.isAdmin()")
-    public ResponseEntity<Void> bulkEditMetadata(@Parameter(description = "Bulk metadata update request") @RequestBody BulkMetadataUpdateRequest bulkMetadataUpdateRequest) {
+    public ResponseEntity<Void> bulkEditMetadata(@Parameter(description = "Bulk metadata update request") @Validated @RequestBody BulkMetadataUpdateRequest bulkMetadataUpdateRequest) {
         boolean mergeCategories = bulkMetadataUpdateRequest.isMergeCategories();
         boolean mergeMoods = bulkMetadataUpdateRequest.isMergeMoods();
         boolean mergeTags = bulkMetadataUpdateRequest.isMergeTags();
@@ -104,7 +103,7 @@ public class MetadataController {
     @ApiResponse(responseCode = "200", description = "Metadata locks toggled successfully")
     @PutMapping("/metadata/toggle-all-lock")
     @PreAuthorize("@securityUtil.canBulkLockUnlockMetadata() or @securityUtil.isAdmin()")
-    public ResponseEntity<List<BookMetadata>> toggleAllMetadata(@Parameter(description = "Toggle all lock request") @RequestBody ToggleAllLockRequest request) {
+    public ResponseEntity<List<BookMetadata>> toggleAllMetadata(@Parameter(description = "Toggle all lock request") @Validated @RequestBody ToggleAllLockRequest request) {
         return ResponseEntity.ok(bookMetadataService.toggleAllLock(request));
     }
 
@@ -112,7 +111,7 @@ public class MetadataController {
     @ApiResponse(responseCode = "200", description = "Field locks toggled successfully")
     @PutMapping("/metadata/toggle-field-locks")
     @PreAuthorize("@securityUtil.canEditMetadata() or @securityUtil.isAdmin()")
-    public ResponseEntity<List<BookMetadata>> toggleFieldLocks(@Parameter(description = "Toggle field locks request") @RequestBody ToggleFieldLocksRequest request) {
+    public ResponseEntity<List<BookMetadata>> toggleFieldLocks(@Parameter(description = "Toggle field locks request") @Validated @RequestBody ToggleFieldLocksRequest request) {
         bookMetadataService.toggleFieldLocks(request.getBookIds(), request.getFieldActions());
         return ResponseEntity.ok().build();
     }
@@ -149,7 +148,7 @@ public class MetadataController {
     @ApiResponse(responseCode = "404", description = "No metadata found for the given ISBN")
     @PostMapping("/metadata/isbn-lookup")
     @PreAuthorize("@securityUtil.canManageLibrary() or @securityUtil.isAdmin()")
-    public ResponseEntity<BookMetadata> lookupByIsbn(@RequestBody IsbnLookupRequest request) {
+    public ResponseEntity<BookMetadata> lookupByIsbn(@Validated @RequestBody IsbnLookupRequest request) {
         BookMetadata metadata = bookMetadataService.lookupByIsbn(request);
         if (metadata == null) {
             return ResponseEntity.notFound().build();

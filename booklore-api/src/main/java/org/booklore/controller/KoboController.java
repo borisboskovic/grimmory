@@ -3,6 +3,7 @@ package org.booklore.controller;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -10,14 +11,18 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.booklore.exception.ApiError;
 import org.booklore.model.dto.BookLoreUser;
 import org.booklore.model.dto.Shelf;
 import org.booklore.model.dto.kobo.*;
 import org.booklore.service.ShelfService;
+import org.booklore.service.appsettings.AppSettingService;
 import org.booklore.service.book.BookDownloadService;
 import org.booklore.service.book.BookService;
 import org.booklore.service.kobo.*;
 import org.springframework.core.io.Resource;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
@@ -37,6 +42,7 @@ public class KoboController {
 
     private static final Pattern KOBO_V1_PRODUCTS_NEXTREAD_PATTERN = Pattern.compile(".*/v1/products/\\d+/nextread.*");
     private String token;
+    private final AppSettingService appSettingService;
     private final KoboServerProxy koboServerProxy;
     private final KoboInitializationService koboInitializationService;
     private final BookService bookService;
@@ -47,6 +53,10 @@ public class KoboController {
     private final KoboThumbnailService koboThumbnailService;
     private final ShelfService shelfService;
     private final BookDownloadService bookDownloadService;
+
+    private boolean isForwardingToKoboStore() {
+        return appSettingService.getAppSettings().getKoboSettings().isForwardToKoboStore();
+    }
 
     @ModelAttribute
     public void captureToken(@PathVariable("token") String token) {
@@ -63,64 +73,43 @@ public class KoboController {
     @Operation(summary = "Sync Kobo library", description = "Sync the user's Kobo library.")
     @ApiResponse(responseCode = "200", description = "Library synced successfully")
     @GetMapping("/v1/library/sync")
-    public ResponseEntity<?> syncLibrary(@AuthenticationPrincipal BookLoreUser user) {
+    public ResponseEntity<List<Entitlement>> syncLibrary(@AuthenticationPrincipal BookLoreUser user) {
         return koboLibrarySyncService.syncLibrary(user, token);
     }
 
-    @Operation(summary = "Get book thumbnail (versioned)", description = "Retrieve the thumbnail image for a local book with cache-busting version.")
-    @ApiResponse(responseCode = "200", description = "Thumbnail returned successfully")
-    @GetMapping("/v1/books/{imageId}/{version}/thumbnail/{width}/{height}/false/image.jpg")
-    public ResponseEntity<Resource> getVersionedThumbnail(
-            @Parameter(description = "Book ID") @PathVariable String imageId,
-            @Parameter(description = "Cover version (timestamp)") @PathVariable String version,
-            @Parameter(description = "Width of the thumbnail") @PathVariable int width,
-            @Parameter(description = "Height of the thumbnail") @PathVariable int height) {
-        return koboThumbnailService.getThumbnail(imageId);
-    }
+    @Operation(summary = "Get book thumbnail", description = "Retrieve the thumbnail image for a local book.")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Thumbnail returned successfully"),
+            @ApiResponse(responseCode = "307", description = "Thumbnail is at another location"),
+    })
 
-    @Operation(summary = "Get book thumbnail", description = "Retrieve the thumbnail image for a Kobo store book.")
-    @ApiResponse(responseCode = "200", description = "Thumbnail returned successfully")
-    @GetMapping("/v1/books/{imageId}/thumbnail/{width}/{height}/false/image.jpg")
+    @GetMapping(
+            value = {
+                    "v1/books/{imageId}/{version}/thumbnail/{width}/{height}/{quality}/{isGreyscale}/image.jpg",
+                    "v1/books/{imageId}/{version}/thumbnail/{width}/{height}/{isGreyscale}/image.jpg",
+                    "v1/books/{imageId}/thumbnail/{width}/{height}/{quality}/{isGreyscale}/image.jpg",
+                    "v1/books/{imageId}/thumbnail/{width}/{height}/{isGreyscale}/image.jpg",
+            },
+            produces = MediaType.IMAGE_JPEG_VALUE
+    )
     public ResponseEntity<Resource> getThumbnail(
-            @Parameter(description = "Image ID") @PathVariable String imageId,
-            @Parameter(description = "Width of the thumbnail") @PathVariable int width,
-            @Parameter(description = "Height of the thumbnail") @PathVariable int height) {
-        if (imageId.startsWith("BL-")) {
-            return koboThumbnailService.getThumbnail(imageId);
-        } else {
-            String cdnUrl = String.format("https://cdn.kobo.com/book-images/%s/%d/%d/false/image.jpg", imageId, width, height);
-            return koboServerProxy.proxyExternalUrl(cdnUrl);
-        }
-    }
-
-    @Operation(summary = "Get greyscale book thumbnail (versioned)", description = "Retrieve a greyscale thumbnail for a local book with cache-busting version.")
-    @ApiResponse(responseCode = "200", description = "Greyscale thumbnail returned successfully")
-    @GetMapping("/v1/books/{imageId}/{version}/thumbnail/{width}/{height}/{quality}/{isGreyscale}/image.jpg")
-    public ResponseEntity<Resource> getVersionedGreyThumbnail(
             @Parameter(description = "Book ID") @PathVariable String imageId,
-            @Parameter(description = "Cover version (timestamp)") @PathVariable String version,
             @Parameter(description = "Width of the thumbnail") @PathVariable int width,
             @Parameter(description = "Height of the thumbnail") @PathVariable int height,
-            @Parameter(description = "Quality of the thumbnail") @PathVariable int quality,
-            @Parameter(description = "Is greyscale") @PathVariable boolean isGreyscale) {
-        return koboThumbnailService.getThumbnail(imageId);
-    }
-
-    @Operation(summary = "Get greyscale book thumbnail", description = "Retrieve a greyscale thumbnail image for a Kobo store book.")
-    @ApiResponse(responseCode = "200", description = "Greyscale thumbnail returned successfully")
-    @GetMapping("/v1/books/{imageId}/thumbnail/{width}/{height}/{quality}/{isGreyscale}/image.jpg")
-    public ResponseEntity<Resource> getGreyThumbnail(
-            @Parameter(description = "Image ID") @PathVariable String imageId,
-            @Parameter(description = "Width of the thumbnail") @PathVariable int width,
-            @Parameter(description = "Height of the thumbnail") @PathVariable int height,
-            @Parameter(description = "Quality of the thumbnail") @PathVariable int quality,
-            @Parameter(description = "Is greyscale") @PathVariable boolean isGreyscale) {
+            @Parameter(description = "Is greyscale") @PathVariable boolean isGreyscale
+    ) {
         if (imageId.startsWith("BL-")) {
             return koboThumbnailService.getThumbnail(imageId);
-        } else {
-            String cdnUrl = String.format("https://cdn.kobo.com/book-images/%s/%d/%d/%d/%b/image.jpg", imageId, width, height, quality, isGreyscale);
-            return koboServerProxy.proxyExternalUrl(cdnUrl);
         }
+
+        if (isForwardingToKoboStore()) {
+            return ResponseEntity
+                    .status(HttpStatus.TEMPORARY_REDIRECT)
+                    .location(koboServerProxy.getKoboCDNCoverUri(imageId, width, height, isGreyscale))
+                    .build();
+        }
+
+        throw ApiError.GENERIC_NOT_FOUND.createException("Not Found");
     }
 
     @Operation(summary = "Authenticate Kobo device", description = "Authenticate a Kobo device.")
@@ -136,8 +125,10 @@ public class KoboController {
     public ResponseEntity<?> getBookMetadata(@Parameter(description = "Book ID") @PathVariable String bookId) {
         if (StringUtils.isNumeric(bookId)) {
             return ResponseEntity.ok(List.of(koboEntitlementService.getMetadataForBook(Long.parseLong(bookId), token)));
-        } else {
+        } else if(isForwardingToKoboStore()) {
             return koboServerProxy.proxyCurrentRequest(null, false);
+        } else {
+            throw ApiError.GENERIC_NOT_FOUND.createException("Not Found");
         }
     }
 
@@ -147,8 +138,10 @@ public class KoboController {
     public ResponseEntity<?> getState(@Parameter(description = "Book ID") @PathVariable String bookId) {
         if (StringUtils.isNumeric(bookId)) {
             return ResponseEntity.ok(new KoboReadingStateList(koboReadingStateService.getReadingState(bookId)));
-        } else {
+        } else if (isForwardingToKoboStore()) {
             return koboServerProxy.proxyCurrentRequest(null, false);
+        } else {
+            throw ApiError.GENERIC_NOT_FOUND.createException("Not Found");
         }
     }
 
@@ -160,8 +153,10 @@ public class KoboController {
             @Parameter(description = "Reading state update body") @RequestBody KoboReadingStateRequest body) {
         if (StringUtils.isNumeric(bookId)) {
             return ResponseEntity.ok(koboReadingStateService.saveReadingState(body.getReadingStates()));
-        } else {
+        } else if (isForwardingToKoboStore()) {
             return koboServerProxy.proxyCurrentRequest(body, false);
+        } else {
+            throw ApiError.GENERIC_NOT_FOUND.createException("Not Found");
         }
     }
 
@@ -181,8 +176,10 @@ public class KoboController {
     public void downloadBook(@Parameter(description = "Book ID") @PathVariable String bookId, HttpServletResponse response) {
         if (StringUtils.isNumeric(bookId)) {
             bookDownloadService.downloadKoboBook(Long.parseLong(bookId), response);
-        } else {
+        } else if (isForwardingToKoboStore()) {
             koboServerProxy.proxyCurrentRequest(null, false);
+        } else {
+            throw ApiError.GENERIC_NOT_FOUND.createException("Not Found");
         }
     }
 
@@ -196,8 +193,10 @@ public class KoboController {
                 bookService.assignShelvesToBooks(Set.of(Long.valueOf(bookId)), Set.of(), Set.of(userKoboShelf.getId()));
             }
             return ResponseEntity.ok().build();
-        } else {
+        } else if (isForwardingToKoboStore()) {
             return koboServerProxy.proxyCurrentRequest(null, false);
+        } else {
+            throw ApiError.GENERIC_NOT_FOUND.createException("Not Found");
         }
     }
 
@@ -206,12 +205,20 @@ public class KoboController {
     @RequestMapping(value = "/**", method = {RequestMethod.GET, RequestMethod.POST, RequestMethod.PUT, RequestMethod.DELETE, RequestMethod.PATCH})
     public ResponseEntity<JsonNode> catchAll(HttpServletRequest request, @RequestBody(required = false) Object body) {
         String path = request.getRequestURI();
+
         if (path.contains("/v1/analytics/event")) {
+            // Never pass along analytics events.
             return ResponseEntity.ok().build();
         }
+
         if (KOBO_V1_PRODUCTS_NEXTREAD_PATTERN.matcher(path).matches()) {
             return ResponseEntity.ok().build();
         }
-        return koboServerProxy.proxyCurrentRequest(body, false);
+
+        if (isForwardingToKoboStore()) {
+            return koboServerProxy.proxyCurrentRequest(body, false);
+        }
+
+        return ResponseEntity.ok().build();
     }
 }

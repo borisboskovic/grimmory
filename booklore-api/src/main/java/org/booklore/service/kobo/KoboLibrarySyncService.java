@@ -11,6 +11,7 @@ import org.booklore.model.entity.KoboSnapshotBookEntity;
 import org.booklore.model.entity.UserBookProgressEntity;
 import org.booklore.repository.KoboDeletedBookProgressRepository;
 import org.booklore.repository.UserBookProgressRepository;
+import org.booklore.service.appsettings.AppSettingService;
 import org.booklore.util.RequestUtils;
 import org.booklore.util.kobo.BookloreSyncTokenGenerator;
 import org.springframework.data.domain.Page;
@@ -38,9 +39,40 @@ public class KoboLibrarySyncService {
     private final KoboServerProxy koboServerProxy;
     private final ObjectMapper objectMapper;
     private final KoboSettingsService koboSettingsService;
+    private final AppSettingService appSettingService;
+
+    private Collection<Entitlement> getEntitlementsFromKoboStoreResponse(ResponseEntity<JsonNode> koboStoreResponse) {
+         return Optional.ofNullable(koboStoreResponse.getBody())
+                .map(body -> {
+                    try {
+                        List<Entitlement> results = new ArrayList<>();
+                        if (body.isArray()) {
+                            for (JsonNode node : body) {
+                                if (node.has("NewEntitlement")) {
+                                    results.add(objectMapper.treeToValue(node, NewEntitlement.class));
+                                } else if (node.has("ChangedEntitlement")) {
+                                    results.add(objectMapper.treeToValue(node, ChangedEntitlement.class));
+                                } else {
+                                    log.warn("Unknown entitlement type in Kobo response: {}", node);
+                                }
+                            }
+                        }
+                        return results;
+                    } catch (Exception e) {
+                        log.error("Failed to map Kobo response to Entitlement objects", e);
+                        return Collections.<Entitlement>emptyList();
+                    }
+                })
+                .orElse(Collections.emptyList());
+    }
+
+
+    private boolean isForwardingToKoboStore() {
+        return appSettingService.getAppSettings().getKoboSettings().isForwardToKoboStore();
+    }
 
     @Transactional
-    public ResponseEntity<?> syncLibrary(BookLoreUser user, String token) {
+    public ResponseEntity<List<Entitlement>> syncLibrary(BookLoreUser user, String token) {
         HttpServletRequest request = RequestUtils.getCurrentRequest();
         BookloreSyncToken syncToken = Optional.ofNullable(tokenGenerator.fromRequestHeaders(request)).orElse(new BookloreSyncToken());
 
@@ -109,39 +141,26 @@ public class KoboLibrarySyncService {
             }
         }
 
-        if (!shouldContinueSync) {
-            ResponseEntity<JsonNode> koboStoreResponse = koboServerProxy.proxyCurrentRequest(null, true);
-            Collection<Entitlement> syncResultsKobo = Optional.ofNullable(koboStoreResponse.getBody())
-                    .map(body -> {
-                        try {
-                            List<Entitlement> results = new ArrayList<>();
-                            if (body.isArray()) {
-                                for (JsonNode node : body) {
-                                    if (node.has("NewEntitlement")) {
-                                        results.add(objectMapper.treeToValue(node, NewEntitlement.class));
-                                    } else if (node.has("ChangedEntitlement")) {
-                                        results.add(objectMapper.treeToValue(node, ChangedEntitlement.class));
-                                    } else {
-                                        log.warn("Unknown entitlement type in Kobo response: {}", node);
-                                    }
-                                }
-                            }
-                            return results;
-                        } catch (Exception e) {
-                            log.error("Failed to map Kobo response to Entitlement objects", e);
-                            return Collections.<Entitlement>emptyList();
-                        }
-                    })
-                    .orElse(Collections.emptyList());
+        if (!shouldContinueSync && isForwardingToKoboStore()) {
+            ResponseEntity<JsonNode> koboStoreResponse = null;
+            try {
+                koboStoreResponse = koboServerProxy.proxyCurrentRequest(null, true);
+            } catch (Exception e) {
+                log.warn("Failed to get response from Kobo /v1/library/sync, fallback to noproxy", e);
+            }
 
-            entitlements.addAll(syncResultsKobo);
+            if (koboStoreResponse != null) {
+                entitlements.addAll(getEntitlementsFromKoboStoreResponse(koboStoreResponse));
 
-            shouldContinueSync = "continue".equalsIgnoreCase(
-                    Optional.ofNullable(koboStoreResponse.getHeaders().getFirst(KoboHeaders.X_KOBO_SYNC)).orElse("")
-            );
+                String upstreamContinueSyncHeader = koboStoreResponse.getHeaders().getFirst(KoboHeaders.X_KOBO_SYNC);
+                String upstreamKoboSyncTokenHeader = koboStoreResponse.getHeaders().getFirst(KoboHeaders.X_KOBO_SYNCTOKEN);
 
-            String koboSyncTokenHeader = koboStoreResponse.getHeaders().getFirst(KoboHeaders.X_KOBO_SYNCTOKEN);
-            syncToken = koboSyncTokenHeader != null ? tokenGenerator.fromBase64(koboSyncTokenHeader) : syncToken;
+                if (upstreamKoboSyncTokenHeader != null) {
+                    syncToken = tokenGenerator.fromBase64(upstreamKoboSyncTokenHeader);
+                }
+
+                shouldContinueSync = "continue".equalsIgnoreCase(upstreamContinueSyncHeader);
+            }
         }
 
         if (shouldContinueSync) {

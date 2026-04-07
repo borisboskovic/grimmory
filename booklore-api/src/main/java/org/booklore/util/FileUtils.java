@@ -24,27 +24,18 @@ public class FileUtils {
 
     private final String FILE_NOT_FOUND_MESSAGE = "File does not exist: ";
 
-    public String getBookFullPath(BookEntity bookEntity) {
+    public Path getBookFullPath(BookEntity bookEntity) {
         BookFileEntity bookFile = bookEntity.getPrimaryBookFile();
-        if (bookFile == null || bookEntity.getLibraryPath() == null) {
-            return null;
-        }
-
-        return Path.of(bookEntity.getLibraryPath().getPath(), bookFile.getFileSubPath(), bookFile.getFileName())
-                .normalize()
-                .toString()
-                .replace("\\", "/");
+        return getBookFullPath(bookEntity, bookFile);
     }
 
-    public String getBookFullPath(BookEntity bookEntity, BookFileEntity bookFile) {
+    public Path getBookFullPath(BookEntity bookEntity, BookFileEntity bookFile) {
         if (bookFile == null || bookEntity.getLibraryPath() == null) {
             return null;
         }
 
         return Path.of(bookEntity.getLibraryPath().getPath(), bookFile.getFileSubPath(), bookFile.getFileName())
-                .normalize()
-                .toString()
-                .replace("\\", "/");
+                .normalize();
     }
 
     public String getBookFullPath(Book book) {
@@ -60,7 +51,7 @@ public class FileUtils {
     }
 
     public Long getFileSizeInKb(BookEntity bookEntity) {
-        Path filePath = Path.of(getBookFullPath(bookEntity));
+        Path filePath = getBookFullPath(bookEntity);
         return getFileSizeInKb(filePath);
     }
 
@@ -73,6 +64,21 @@ public class FileUtils {
             return Files.size(filePath) / 1024;
         } catch (IOException e) {
             log.error("Failed to get file size for path [{}]: {}", filePath, e.getMessage(), e);
+            return null;
+        }
+    }
+
+    /**
+     * Get last modified time of the file in milliseconds since the
+     * epoch (00:00:00 GMT, January 1, 1970).
+     * @param filePath the path to the file
+     * @return milliseconds since the epoch, or null if an I/O error occurs
+     */
+    public Long getFileLastModified(Path filePath) {
+        try {
+            return Files.getLastModifiedTime(filePath).toMillis();
+        } catch (IOException e) {
+            log.error("Failed to get last modified for path [{}]: {}", filePath, e.getMessage(), e);
             return null;
         }
     }

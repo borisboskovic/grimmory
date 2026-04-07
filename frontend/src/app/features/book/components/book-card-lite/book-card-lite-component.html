@@ -1,0 +1,29 @@
+<div class="book-cover-wrapper" [class.audiobook-only]="isAudiobookOnly()" (mouseenter)="isHovered = true" (mouseleave)="isHovered = false">
+  @if (getThumbnailUrl(); as coverUrl) {
+    <img
+      [src]="coverUrl"
+      class="book-cover"
+      alt="Cover of {{ book.metadata?.title }}"
+      loading="lazy"/>
+  } @else {
+    <app-cover-placeholder class="book-cover" [title]="book.metadata?.title ?? ''" [author]="(book.metadata?.authors ?? []).join(', ')" size="sm" />
+  }
+    
+  @if (showSeriesNumber && !book.seriesCount && book.metadata?.seriesNumber !== null && book.metadata?.seriesNumber !== undefined) {
+    <div class="series-number-overlay">
+      #{{ book.metadata?.seriesNumber }}
+    </div>
+  }
+
+  @if (!this.isActive) {
+    <p-button
+      icon="pi pi-info"
+      class="info-btn"
+      [rounded]="true"
+      [pTooltip]="book.metadata?.title"
+      tooltipPosition="top"
+      [ngClass]="{ 'visible': isHovered }"
+      (onClick)="openBookInfo(book)">
+    </p-button>
+  }
+</div>

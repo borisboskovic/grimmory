@@ -19,21 +19,13 @@ import org.booklore.util.ArchiveUtils;
 import org.booklore.util.BookCoverUtils;
 import org.booklore.util.FileService;
 import org.booklore.util.FileUtils;
-import org.booklore.util.UnrarHelper;
-import com.github.junrar.Archive;
-import com.github.junrar.rarfile.FileHeader;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry;
-import org.apache.commons.compress.archivers.sevenz.SevenZFile;
-import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
-import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.springframework.stereotype.Service;
 
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.InputStream;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -46,8 +38,6 @@ import static org.booklore.util.FileService.truncate;
 public class CbxProcessor extends AbstractFileProcessor implements BookFileProcessor {
 
     private static final Pattern UNDERSCORE_HYPHEN_PATTERN = Pattern.compile("[_\\-]");
-    private static final Pattern IMAGE_EXTENSION_PATTERN = Pattern.compile(".*\\.(jpg|jpeg|png|webp)");
-    private static final Pattern IMAGE_EXTENSION_CASE_INSENSITIVE_PATTERN = Pattern.compile("(?i).*\\.(jpg|jpeg|png|webp)");
     private final CbxMetadataExtractor cbxMetadataExtractor;
 
     public CbxProcessor(BookRepository bookRepository,
@@ -65,7 +55,7 @@ public class CbxProcessor extends AbstractFileProcessor implements BookFileProce
     @Override
     public BookEntity processNewFile(LibraryFile libraryFile) {
         BookEntity bookEntity = bookCreatorService.createShellBook(libraryFile, BookFileType.CBX);
-        bookEntity.getPrimaryBookFile().setArchiveType(ArchiveUtils.detectArchiveType(new File(FileUtils.getBookFullPath(bookEntity))));
+        bookEntity.getPrimaryBookFile().setArchiveType(ArchiveUtils.detectArchiveType(FileUtils.getBookFullPath(bookEntity).toFile()));
         boolean coverGenerated = generateCover(bookEntity);
         if (!coverGenerated) {
             var folder = getBookFolderForCoverFallback(libraryFile);
@@ -88,9 +78,10 @@ public class CbxProcessor extends AbstractFileProcessor implements BookFileProce
 
     @Override
     public boolean generateCover(BookEntity bookEntity, BookFileEntity bookFile) {
-        File file = new File(FileUtils.getBookFullPath(bookEntity, bookFile));
+        Path bookPath = FileUtils.getBookFullPath(bookEntity, bookFile);
+
         try {
-            Optional<BufferedImage> imageOptional = extractImagesFromArchive(file);
+            Optional<BufferedImage> imageOptional = extractImagesFromArchive(bookPath);
             if (imageOptional.isPresent()) {
                 BufferedImage image = imageOptional.get();
                 try {
@@ -117,141 +108,25 @@ public class CbxProcessor extends AbstractFileProcessor implements BookFileProce
         return List.of(BookFileType.CBX);
     }
 
-    private Optional<BufferedImage> extractImagesFromArchive(File file) {
-        ArchiveUtils.ArchiveType type = ArchiveUtils.detectArchiveType(file);
+    private Optional<BufferedImage> extractImagesFromArchive(Path path) {
+        try{
+            byte[] coverBytes = cbxMetadataExtractor.extractCover(path);
 
-        return switch (type) {
-            case ZIP -> extractFirstImageFromZip(file);
-            case SEVEN_ZIP -> extractFirstImageFrom7z(file);
-            case RAR -> extractFirstImageFromRar(file);
-            default -> Optional.empty();
-        };
-    }
+            if (coverBytes == null) {
+                return Optional.empty();
+            }
 
-    private Optional<BufferedImage> extractFirstImageFromZip(File file) {
-        // Fast path: Try reading from Central Directory
-        try (ZipFile zipFile = ZipFile.builder()
-                .setFile(file)
-                .setUseUnicodeExtraFields(true)
-                .setIgnoreLocalFileHeader(true)
-                .get()) {
-            Optional<BufferedImage> image = findAndReadFirstImage(zipFile);
-            if (image.isPresent()) return image;
+            return Optional.ofNullable(FileService.readImage(new ByteArrayInputStream(coverBytes)));
         } catch (Exception e) {
-            log.debug("Fast path failed for ZIP extraction: {}", e.getMessage());
+            log.warn("Error reading archive cover {}: {}", path.getFileName(), e.getMessage());
         }
 
-        // Slow path: Fallback to scanning local file headers
-        try (ZipFile zipFile = ZipFile.builder()
-                .setFile(file)
-                .setUseUnicodeExtraFields(true)
-                .setIgnoreLocalFileHeader(false)
-                .get()) {
-            return findAndReadFirstImage(zipFile);
-        } catch (Exception e) {
-            log.error("Error extracting ZIP: {}", e.getMessage());
-            return Optional.empty();
-        }
-    }
-
-    private Optional<BufferedImage> findAndReadFirstImage(ZipFile zipFile) {
-        return Collections.list(zipFile.getEntries()).stream()
-                .filter(e -> !e.isDirectory() && IMAGE_EXTENSION_CASE_INSENSITIVE_PATTERN.matcher(e.getName()).matches())
-                .min(Comparator.comparing(ZipArchiveEntry::getName))
-                .map(entry -> {
-                    try (InputStream is = zipFile.getInputStream(entry)) {
-                        return FileService.readImage(is);
-                    } catch (Exception e) {
-                        log.warn("Failed to read image from ZIP entry {}: {}", entry.getName(), e.getMessage());
-                        return null;
-                    }
-                });
-    }
-
-    private Optional<BufferedImage> extractFirstImageFrom7z(File file) {
-        try (SevenZFile sevenZFile = SevenZFile.builder().setFile(file).get()) {
-            List<SevenZArchiveEntry> imageEntries = new ArrayList<>();
-            SevenZArchiveEntry entry;
-            while ((entry = sevenZFile.getNextEntry()) != null) {
-                if (!entry.isDirectory() && IMAGE_EXTENSION_CASE_INSENSITIVE_PATTERN.matcher(entry.getName()).matches()) {
-                    imageEntries.add(entry);
-                }
-            }
-            imageEntries.sort(Comparator.comparing(SevenZArchiveEntry::getName));
-
-            try (SevenZFile sevenZFileReset = SevenZFile.builder().setFile(file).get()) {
-                for (SevenZArchiveEntry imgEntry : imageEntries) {
-                    SevenZArchiveEntry current;
-                    while ((current = sevenZFileReset.getNextEntry()) != null) {
-                        if (current.equals(imgEntry)) {
-                            byte[] content = new byte[(int) current.getSize()];
-                            int offset = 0;
-                            while (offset < content.length) {
-                                int bytesRead = sevenZFileReset.read(content, offset, content.length - offset);
-                                if (bytesRead < 0) break;
-                                offset += bytesRead;
-                            }
-                            return Optional.ofNullable(FileService.readImage(new ByteArrayInputStream(content)));
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {
-            log.error("Error extracting 7z: {}", e.getMessage());
-        }
-        return Optional.empty();
-    }
-
-    private Optional<BufferedImage> extractFirstImageFromRar(File file) {
-        try (Archive archive = new Archive(file)) {
-            List<FileHeader> imageHeaders = archive.getFileHeaders().stream()
-                    .filter(h -> !h.isDirectory() && IMAGE_EXTENSION_PATTERN.matcher(h.getFileName().toLowerCase()).matches())
-                    .sorted(Comparator.comparing(FileHeader::getFileName))
-                    .toList();
-
-            for (FileHeader header : imageHeaders) {
-                try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
-                    archive.extractFile(header, baos);
-                    return Optional.ofNullable(FileService.readImage(new ByteArrayInputStream(baos.toByteArray())));
-                } catch (Exception e) {
-                    log.warn("Error reading RAR entry {}: {}", header.getFileName(), e.getMessage());
-                }
-            }
-        } catch (Exception e) {
-            if (UnrarHelper.isAvailable()) {
-                log.info("junrar failed for {}, falling back to unrar CLI: {}", file.getName(), e.getMessage());
-                return extractFirstImageFromRarViaCli(file);
-            }
-            log.error("Error extracting RAR: {}", e.getMessage());
-        }
-        return Optional.empty();
-    }
-
-    private Optional<BufferedImage> extractFirstImageFromRarViaCli(File file) {
-        try {
-            List<String> entries = UnrarHelper.listEntries(file.toPath());
-            List<String> imageEntries = entries.stream()
-                    .filter(name -> IMAGE_EXTENSION_CASE_INSENSITIVE_PATTERN.matcher(name).matches())
-                    .sorted()
-                    .toList();
-            for (String entry : imageEntries) {
-                try {
-                    byte[] bytes = UnrarHelper.extractEntryBytes(file.toPath(), entry);
-                    BufferedImage image = FileService.readImage(new ByteArrayInputStream(bytes));
-                    if (image != null) return Optional.of(image);
-                } catch (Exception ex) {
-                    log.warn("Error reading RAR entry via CLI {}: {}", entry, ex.getMessage());
-                }
-            }
-        } catch (Exception e) {
-            log.error("unrar CLI fallback also failed for {}: {}", file.getName(), e.getMessage());
-        }
         return Optional.empty();
     }
 
     private void extractAndSetMetadata(BookEntity bookEntity) {
         try {
-            BookMetadata extracted = cbxMetadataExtractor.extractMetadata(new File(FileUtils.getBookFullPath(bookEntity)));
+            BookMetadata extracted = cbxMetadataExtractor.extractMetadata(FileUtils.getBookFullPath(bookEntity).toFile());
             if (extracted == null) {
                 // Fallback to filename-derived title
                 setMetadata(bookEntity);
@@ -259,7 +134,7 @@ public class CbxProcessor extends AbstractFileProcessor implements BookFileProce
             }
 
             BookMetadataEntity metadata = bookEntity.getMetadata();
-            
+
             // Basic fields
             metadata.setTitle(truncate(extracted.getTitle(), 1000));
             metadata.setSubtitle(truncate(extracted.getSubtitle(), 1000));
@@ -271,11 +146,11 @@ public class CbxProcessor extends AbstractFileProcessor implements BookFileProce
             metadata.setSeriesTotal(extracted.getSeriesTotal());
             metadata.setPageCount(extracted.getPageCount());
             metadata.setLanguage(truncate(extracted.getLanguage(), 1000));
-            
+
             // ISBN fields
             metadata.setIsbn13(truncate(extracted.getIsbn13(), 64));
             metadata.setIsbn10(truncate(extracted.getIsbn10(), 64));
-            
+
             // External IDs
             metadata.setAsin(truncate(extracted.getAsin(), 20));
             metadata.setGoodreadsId(truncate(extracted.getGoodreadsId(), 100));
@@ -285,7 +160,7 @@ public class CbxProcessor extends AbstractFileProcessor implements BookFileProce
             metadata.setComicvineId(truncate(extracted.getComicvineId(), 100));
             metadata.setLubimyczytacId(truncate(extracted.getLubimyczytacId(), 100));
             metadata.setRanobedbId(truncate(extracted.getRanobedbId(), 100));
-            
+
             // Ratings
             metadata.setAmazonRating(extracted.getAmazonRating());
             metadata.setAmazonReviewCount(extracted.getAmazonReviewCount());
@@ -300,7 +175,7 @@ public class CbxProcessor extends AbstractFileProcessor implements BookFileProce
             if (extracted.getAuthors() != null) {
                 bookCreatorService.addAuthorsToBook(extracted.getAuthors(), bookEntity);
             }
-            
+
             // Categories
             if (extracted.getCategories() != null) {
                 Set<String> validCategories = extracted.getCategories().stream()
@@ -308,7 +183,7 @@ public class CbxProcessor extends AbstractFileProcessor implements BookFileProce
                         .collect(Collectors.toSet());
                 bookCreatorService.addCategoriesToBook(validCategories, bookEntity);
             }
-            
+
             // Moods
             if (extracted.getMoods() != null && !extracted.getMoods().isEmpty()) {
                 Set<String> validMoods = extracted.getMoods().stream()
@@ -316,7 +191,7 @@ public class CbxProcessor extends AbstractFileProcessor implements BookFileProce
                         .collect(Collectors.toSet());
                 bookCreatorService.addMoodsToBook(validMoods, bookEntity);
             }
-            
+
             // Tags
             if (extracted.getTags() != null && !extracted.getTags().isEmpty()) {
                 Set<String> validTags = extracted.getTags().stream()
